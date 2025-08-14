@@ -1,27 +1,37 @@
 #include "parameters.h"
 
-double INIT_DEPTH;
-double MIN_PARALLAX;
-double ACC_N, ACC_W;
-double GYR_N, GYR_W;
+double INIT_DEPTH; // initial depth for triangulation
+double MIN_PARALLAX; // minimum parallax for triangulation 最小视差，用于筛选关键帧
+double ACC_N, ACC_W; // 加计噪声与随机游走
+double GYR_N, GYR_W; // 陀螺噪声与随机游走
 
+// imu-camera extrinsic parameters rotation and translation
 std::vector<Eigen::Matrix3d> RIC;
 std::vector<Eigen::Vector3d> TIC;
 
 Eigen::Vector3d G{0.0, 0.0, 9.8};
 
+// 加速度计和陀螺仪零偏的阈值
 double BIAS_ACC_THRESHOLD;
 double BIAS_GYR_THRESHOLD;
+
+// 求解器的最大运行时间与迭代次数
 double SOLVER_TIME;
 int NUM_ITERATIONS;
+
+// 是否估计外参、时间偏移以及是否使用滚动快门模型
 int ESTIMATE_EXTRINSIC;
 int ESTIMATE_TD;
 int ROLLING_SHUTTER;
+
+
 std::string EX_CALIB_RESULT_PATH;
 std::string VINS_RESULT_PATH;
 std::string IMU_TOPIC;
-double ROW, COL;
-double TD, TR;
+
+
+double ROW, COL; // 图像高度与宽度
+double TD, TR; // 时间偏移与滚动快门模型的读出时间
 
 template <typename T>
 T readParam(ros::NodeHandle &n, std::string name)
