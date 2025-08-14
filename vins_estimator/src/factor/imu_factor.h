@@ -9,16 +9,26 @@
 
 #include <ceres/ceres.h>
 
+// 定义imu残差因子，用于构建imu预积分残差项，并计算对应的jacobian matrix
+
 class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
 {
+  // 表示一个残差维度为 15 的因子，对应以下状态变量
+  // 第一帧的位姿（7：3D 平移 + 四元数旋转）
+  // 第一个帧的速度,加速度和角速度偏置（9：3D 速度 + 3D 加速度偏置 + 3D 角速度偏置）
+  // 第二帧的位姿（7：3D 平移 + 四元数旋转）
+  // 第二个帧的速度,加速度和角速度偏置（9：3D 速度 + 3D 加速度偏置 + 3D 角速度偏置）
   public:
     IMUFactor() = delete;
     IMUFactor(IntegrationBase* _pre_integration):pre_integration(_pre_integration)
     {
+        // pre_integration 是预先计算好的 IMU 预积分数据
     }
     virtual bool Evaluate(double const *const *parameters, double *residuals, double **jacobians) const
     {
+        // Evaluate 函数用于解析参数块，计算残差，并计算雅可比矩阵
 
+        // i frame 的平移和旋转（四元数），速度，加计零偏和陀螺仪零偏
         Eigen::Vector3d Pi(parameters[0][0], parameters[0][1], parameters[0][2]);
         Eigen::Quaterniond Qi(parameters[0][6], parameters[0][3], parameters[0][4], parameters[0][5]);
 
@@ -26,6 +36,7 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
         Eigen::Vector3d Bai(parameters[1][3], parameters[1][4], parameters[1][5]);
         Eigen::Vector3d Bgi(parameters[1][6], parameters[1][7], parameters[1][8]);
 
+        // j frame 的平移和旋转（四元数），速度，加计零偏和陀螺仪零偏
         Eigen::Vector3d Pj(parameters[2][0], parameters[2][1], parameters[2][2]);
         Eigen::Quaterniond Qj(parameters[2][6], parameters[2][3], parameters[2][4], parameters[2][5]);
 
@@ -33,23 +44,9 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
         Eigen::Vector3d Baj(parameters[3][3], parameters[3][4], parameters[3][5]);
         Eigen::Vector3d Bgj(parameters[3][6], parameters[3][7], parameters[3][8]);
 
-//Eigen::Matrix<double, 15, 15> Fd;
-//Eigen::Matrix<double, 15, 12> Gd;
+        // 调用 pre_integration->evaluate(...) 计算预测值与当前状态之间的残差
 
-//Eigen::Vector3d pPj = Pi + Vi * sum_t - 0.5 * g * sum_t * sum_t + corrected_delta_p;
-//Eigen::Quaterniond pQj = Qi * delta_q;
-//Eigen::Vector3d pVj = Vi - g * sum_t + corrected_delta_v;
-//Eigen::Vector3d pBaj = Bai;
-//Eigen::Vector3d pBgj = Bgi;
-
-//Vi + Qi * delta_v - g * sum_dt = Vj;
-//Qi * delta_q = Qj;
-
-//delta_p = Qi.inverse() * (0.5 * g * sum_dt * sum_dt + Pj - Pi);
-//delta_v = Qi.inverse() * (g * sum_dt + Vj - Vi);
-//delta_q = Qi.inverse() * Qj;
-
-#if 0
+        #if 0
         if ((Bai - pre_integration->linearized_ba).norm() > 0.10 ||
             (Bgi - pre_integration->linearized_bg).norm() > 0.01)
         {
@@ -61,28 +58,32 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
         residual = pre_integration->evaluate(Pi, Qi, Vi, Bai, Bgi,
                                             Pj, Qj, Vj, Baj, Bgj);
 
+        // 计算残差的平方根信息矩阵并进行Cholesky分解，对残差进行加权
         Eigen::Matrix<double, 15, 15> sqrt_info = Eigen::LLT<Eigen::Matrix<double, 15, 15>>(pre_integration->covariance.inverse()).matrixL().transpose();
         //sqrt_info.setIdentity();
         residual = sqrt_info * residual;
 
         if (jacobians)
         {
+            // 计算雅可比矩阵
             double sum_dt = pre_integration->sum_dt;
+            // 位移对加计零偏的jacobian
             Eigen::Matrix3d dp_dba = pre_integration->jacobian.template block<3, 3>(O_P, O_BA);
+            // 位移对陀螺仪零偏的jacobian
             Eigen::Matrix3d dp_dbg = pre_integration->jacobian.template block<3, 3>(O_P, O_BG);
-
+            // 旋转对陀螺仪零偏的jacobian
             Eigen::Matrix3d dq_dbg = pre_integration->jacobian.template block<3, 3>(O_R, O_BG);
-
+            // 速度对加计零偏的jacobian
             Eigen::Matrix3d dv_dba = pre_integration->jacobian.template block<3, 3>(O_V, O_BA);
+            // 速度对陀螺仪零偏的jacobian
             Eigen::Matrix3d dv_dbg = pre_integration->jacobian.template block<3, 3>(O_V, O_BG);
 
             if (pre_integration->jacobian.maxCoeff() > 1e8 || pre_integration->jacobian.minCoeff() < -1e8)
             {
-                ROS_WARN("numerical unstable in preintegration");
-                //std::cout << pre_integration->jacobian << std::endl;
-///                ROS_BREAK();
+                std::cout << "numerical unstable in preintegration" << std::endl;
             }
 
+            // 对前一帧位姿的雅可比 Pi Qi
             if (jacobians[0])
             {
                 Eigen::Map<Eigen::Matrix<double, 15, 7, Eigen::RowMajor>> jacobian_pose_i(jacobians[0]);
@@ -104,11 +105,11 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
 
                 if (jacobian_pose_i.maxCoeff() > 1e8 || jacobian_pose_i.minCoeff() < -1e8)
                 {
-                    ROS_WARN("numerical unstable in preintegration");
-                    //std::cout << sqrt_info << std::endl;
-                    //ROS_BREAK();
+                    std::cout << "numerical unstable in preintegration" << std::endl;
                 }
             }
+
+            // 对前一帧速度和偏置的雅可比（Vi, Bai, Bgi）
             if (jacobians[1])
             {
                 Eigen::Map<Eigen::Matrix<double, 15, 9, Eigen::RowMajor>> jacobian_speedbias_i(jacobians[1]);
@@ -120,8 +121,6 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
 #if 0
             jacobian_speedbias_i.block<3, 3>(O_R, O_BG - O_V) = -dq_dbg;
 #else
-                //Eigen::Quaterniond corrected_delta_q = pre_integration->delta_q * Utility::deltaQ(dq_dbg * (Bgi - pre_integration->linearized_bg));
-                //jacobian_speedbias_i.block<3, 3>(O_R, O_BG - O_V) = -Utility::Qleft(Qj.inverse() * Qi * corrected_delta_q).bottomRightCorner<3, 3>() * dq_dbg;
                 jacobian_speedbias_i.block<3, 3>(O_R, O_BG - O_V) = -Utility::Qleft(Qj.inverse() * Qi * pre_integration->delta_q).bottomRightCorner<3, 3>() * dq_dbg;
 #endif
 
@@ -134,10 +133,9 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
                 jacobian_speedbias_i.block<3, 3>(O_BG, O_BG - O_V) = -Eigen::Matrix3d::Identity();
 
                 jacobian_speedbias_i = sqrt_info * jacobian_speedbias_i;
-
-                //ROS_ASSERT(fabs(jacobian_speedbias_i.maxCoeff()) < 1e8);
-                //ROS_ASSERT(fabs(jacobian_speedbias_i.minCoeff()) < 1e8);
             }
+
+            // 对后一帧位姿的雅可比 Pj Qj
             if (jacobians[2])
             {
                 Eigen::Map<Eigen::Matrix<double, 15, 7, Eigen::RowMajor>> jacobian_pose_j(jacobians[2]);
@@ -153,10 +151,9 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
 #endif
 
                 jacobian_pose_j = sqrt_info * jacobian_pose_j;
-
-                //ROS_ASSERT(fabs(jacobian_pose_j.maxCoeff()) < 1e8);
-                //ROS_ASSERT(fabs(jacobian_pose_j.minCoeff()) < 1e8);
             }
+
+            // 对后一帧速度和偏置的雅可比（Vj, Baj, Bgj）
             if (jacobians[3])
             {
                 Eigen::Map<Eigen::Matrix<double, 15, 9, Eigen::RowMajor>> jacobian_speedbias_j(jacobians[3]);
@@ -169,21 +166,12 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
                 jacobian_speedbias_j.block<3, 3>(O_BG, O_BG - O_V) = Eigen::Matrix3d::Identity();
 
                 jacobian_speedbias_j = sqrt_info * jacobian_speedbias_j;
-
-                //ROS_ASSERT(fabs(jacobian_speedbias_j.maxCoeff()) < 1e8);
-                //ROS_ASSERT(fabs(jacobian_speedbias_j.minCoeff()) < 1e8);
             }
         }
 
         return true;
     }
 
-    //bool Evaluate_Direct(double const *const *parameters, Eigen::Matrix<double, 15, 1> &residuals, Eigen::Matrix<double, 15, 30> &jacobians);
-
-    //void checkCorrection();
-    //void checkTransition();
-    //void checkJacobian(double **parameters);
     IntegrationBase* pre_integration;
-
 };
 

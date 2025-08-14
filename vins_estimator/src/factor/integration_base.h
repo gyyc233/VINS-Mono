@@ -6,6 +6,8 @@
 #include <ceres/ceres.h>
 using namespace Eigen;
 
+// 使用中值积分进行imu预积分计算
+
 class IntegrationBase
 {
   public:
@@ -27,14 +29,22 @@ class IntegrationBase
         noise.block<3, 3>(15, 15) =  (GYR_W * GYR_W) * Eigen::Matrix3d::Identity();
     }
 
+    // 记录用于IMU积分的数据；并调用propagate()函数进行预积分计算
     void push_back(double dt, const Eigen::Vector3d &acc, const Eigen::Vector3d &gyr)
     {
         dt_buf.push_back(dt);
         acc_buf.push_back(acc);
         gyr_buf.push_back(gyr);
-        propagate(dt, acc, gyr);
+        propagate(dt, acc, gyr); // // 进行IMU积分计算
     }
 
+    /**
+     * @brief IMU的加速度和角速度偏置发生改变，那么需要更新IMU积分的值
+     * 
+     * @param _linearized_ba 输入的ba
+     * @param _linearized_bg 输入的bg
+     * @return ** void 
+     */
     void repropagate(const Eigen::Vector3d &_linearized_ba, const Eigen::Vector3d &_linearized_bg)
     {
         sum_dt = 0.0;
@@ -47,10 +57,23 @@ class IntegrationBase
         linearized_bg = _linearized_bg;
         jacobian.setIdentity();
         covariance.setZero();
+
+        // 更新当前滑窗中的IMU积分即可
         for (int i = 0; i < static_cast<int>(dt_buf.size()); i++)
             propagate(dt_buf[i], acc_buf[i], gyr_buf[i]);
     }
 
+    /**
+     * @brief 中值法计算IMU预积分
+     * ATTENTION 注意各个量更新的顺序
+     * @param[in] _dt 两个IMU数据之间的时间间隔
+     * @param[in&out] _acc_0、_gyr_0；_acc_1、_gyr_1 上一时刻和当前时刻加速度和角加速度的值
+     * @param[in&out] delta_p、delta_q、delta_v是从上一图像帧到上一时刻的IMU积分值
+     * @param[in&out] linearized_ba、linearized_bg 上一时刻的偏置ba、bg
+     * @param[in&out] result_delta_p、result_delta_q、result_delta_v 从上一图像帧到当前时刻的IMU积分值
+     * @param[in&out]  result_linearized_ba、result_linearized_bg 当前时刻的偏置ba、bg
+     * @param[in] update_jacobian 是否进行雅可比的更新
+    */
     void midPointIntegration(double _dt, 
                             const Eigen::Vector3d &_acc_0, const Eigen::Vector3d &_gyr_0,
                             const Eigen::Vector3d &_acc_1, const Eigen::Vector3d &_gyr_1,
@@ -60,16 +83,25 @@ class IntegrationBase
                             Eigen::Vector3d &result_linearized_ba, Eigen::Vector3d &result_linearized_bg, bool update_jacobian)
     {
         //ROS_INFO("midpoint integration");
-        Vector3d un_acc_0 = delta_q * (_acc_0 - linearized_ba);
-        Vector3d un_gyr = 0.5 * (_gyr_0 + _gyr_1) - linearized_bg;
+        // delta_q = 上上时刻与上一时刻的相对旋转
+        Vector3d un_acc_0 = delta_q * (_acc_0 - linearized_ba); // a = a^ - ba
+        Vector3d un_gyr = 0.5 * (_gyr_0 + _gyr_1) - linearized_bg; // 两个w(角加速度)相加平均后的值 = 0.5*(w_i + w_i+1) - bw_i；其中认为相邻时刻的偏置在极短的时间内是不变的
+
+        // Quaterniond(1, un_gyr(0) * _dt / 2, un_gyr(1) * _dt / 2, un_gyr(2) * _dt / 2) = 上一时刻与当前时刻的相对旋转
         result_delta_q = delta_q * Quaterniond(1, un_gyr(0) * _dt / 2, un_gyr(1) * _dt / 2, un_gyr(2) * _dt / 2);
-        Vector3d un_acc_1 = result_delta_q * (_acc_1 - linearized_ba);
-        Vector3d un_acc = 0.5 * (un_acc_0 + un_acc_1);
+
+        Vector3d un_acc_1 = result_delta_q * (_acc_1 - linearized_ba); // 使用更新后的result_delta_q将i+1时刻的加速度旋转到世界坐标系
+        Vector3d un_acc = 0.5 * (un_acc_0 + un_acc_1); // 上一时刻和当前时刻平均后的加速度值
+
+        // 更新 p v
         result_delta_p = delta_p + delta_v * _dt + 0.5 * un_acc * _dt * _dt;
         result_delta_v = delta_v + un_acc * _dt;
         result_linearized_ba = linearized_ba;
         result_linearized_bg = linearized_bg;         
 
+        // 计算噪声协方差矩阵的递推
+        // 这里的F(上一时刻的状态误差传递到当前时刻的传递系数)、V(上一时刻则量噪声传递到当前时刻的传递系数) 和公式推导都能相对应
+        // https://zhuanlan.zhihu.com/p/534577566 vins mono imu预积分推导
         if(update_jacobian)
         {
             Vector3d w_x = 0.5 * (_gyr_0 + _gyr_1) - linearized_bg;
@@ -127,6 +159,9 @@ class IntegrationBase
 
     }
 
+    /**
+     * @brief 通过前后的IMU数据，计算该时间段内的IMU预积分值并更新IMU积分值
+    */
     void propagate(double _dt, const Eigen::Vector3d &_acc_1, const Eigen::Vector3d &_gyr_1)
     {
         dt = _dt;
@@ -138,6 +173,7 @@ class IntegrationBase
         Vector3d result_linearized_ba;
         Vector3d result_linearized_bg;
 
+        // 利用中值积分计算IMU积分
         midPointIntegration(_dt, acc_0, gyr_0, _acc_1, _gyr_1, delta_p, delta_q, delta_v,
                             linearized_ba, linearized_bg,
                             result_delta_p, result_delta_q, result_delta_v,
@@ -145,12 +181,13 @@ class IntegrationBase
 
         //checkJacobian(_dt, acc_0, gyr_0, acc_1, gyr_1, delta_p, delta_q, delta_v,
         //                    linearized_ba, linearized_bg);
+        // 更新IMU积分值（将当前时刻的积分值赋值给上一时刻）以及相关IMU数据
         delta_p = result_delta_p;
         delta_q = result_delta_q;
         delta_v = result_delta_v;
         linearized_ba = result_linearized_ba;
         linearized_bg = result_linearized_bg;
-        delta_q.normalize();
+        delta_q.normalize(); // 单位四元数
         sum_dt += dt;
         acc_0 = acc_1;
         gyr_0 = gyr_1;  
@@ -160,8 +197,9 @@ class IntegrationBase
     Eigen::Matrix<double, 15, 1> evaluate(const Eigen::Vector3d &Pi, const Eigen::Quaterniond &Qi, const Eigen::Vector3d &Vi, const Eigen::Vector3d &Bai, const Eigen::Vector3d &Bgi,
                                           const Eigen::Vector3d &Pj, const Eigen::Quaterniond &Qj, const Eigen::Vector3d &Vj, const Eigen::Vector3d &Baj, const Eigen::Vector3d &Bgj)
     {
+        // 计算残差
         Eigen::Matrix<double, 15, 1> residuals;
-
+        // 增量对p、v、q以及偏置ba、bg的一阶导数
         Eigen::Matrix3d dp_dba = jacobian.block<3, 3>(O_P, O_BA);
         Eigen::Matrix3d dp_dbg = jacobian.block<3, 3>(O_P, O_BG);
 
@@ -192,7 +230,7 @@ class IntegrationBase
     const Eigen::Vector3d linearized_acc, linearized_gyr;
     Eigen::Vector3d linearized_ba, linearized_bg;
 
-    Eigen::Matrix<double, 15, 15> jacobian, covariance;
+    Eigen::Matrix<double, 15, 15> jacobian, covariance;　// 增量对p、v、q以及偏置ba、bg的一阶导数
     Eigen::Matrix<double, 15, 15> step_jacobian;
     Eigen::Matrix<double, 15, 18> step_V;
     Eigen::Matrix<double, 18, 18> noise;
@@ -202,9 +240,10 @@ class IntegrationBase
     Eigen::Quaterniond delta_q;
     Eigen::Vector3d delta_v;
 
-    std::vector<double> dt_buf;
-    std::vector<Eigen::Vector3d> acc_buf;
-    std::vector<Eigen::Vector3d> gyr_buf;
+    // 将所有进入IMU预积分记录下来
+    std::vector<double> dt_buf; // 时间间隔
+    std::vector<Eigen::Vector3d> acc_buf; // 加速度
+    std::vector<Eigen::Vector3d> gyr_buf; // 速度
 
 };
 /*
