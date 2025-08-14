@@ -1,5 +1,8 @@
 #include "utility.h"
 
+/// @brief 估计的重力与(0,0,1)向量对齐，输出它们的旋转
+/// @param g 估计的重力向量
+/// @return 
 Eigen::Matrix3d Utility::g2R(const Eigen::Vector3d &g)
 {
     Eigen::Matrix3d R0;

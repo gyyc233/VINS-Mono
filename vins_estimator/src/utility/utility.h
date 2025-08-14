@@ -12,6 +12,10 @@
 class Utility
 {
   public:
+    /// @brief  Convert a rotation vector to a quaternion.
+    /// @tparam Derived 
+    /// @param theta 
+    /// @return 
     template <typename Derived>
     static Eigen::Quaternion<typename Derived::Scalar> deltaQ(const Eigen::MatrixBase<Derived> &theta)
     {
@@ -37,16 +41,20 @@ class Utility
         return ans;
     }
 
+    /// @brief 确保四元数的实部为正，若w为负数，则将整个四元数取反
+    /// @tparam Derived 
+    /// @param q 
+    /// @return 
     template <typename Derived>
     static Eigen::Quaternion<typename Derived::Scalar> positify(const Eigen::QuaternionBase<Derived> &q)
     {
-        //printf("a: %f %f %f %f", q.w(), q.x(), q.y(), q.z());
-        //Eigen::Quaternion<typename Derived::Scalar> p(-q.w(), -q.x(), -q.y(), -q.z());
-        //printf("b: %f %f %f %f", p.w(), p.x(), p.y(), p.z());
-        //return q.template w() >= (typename Derived::Scalar)(0.0) ? q : Eigen::Quaternion<typename Derived::Scalar>(-q.w(), -q.x(), -q.y(), -q.z());
-        return q;
+        return q.template w() >= (typename Derived::Scalar)(0.0) ? q : Eigen::Quaternion<typename Derived::Scalar>(-q.w(), -q.x(), -q.y(), -q.z());
     }
 
+    /// @brief 四元数左乘 q * p = Qleft(q) * p
+    /// @tparam Derived
+    /// @param q 
+    /// @return 
     template <typename Derived>
     static Eigen::Matrix<typename Derived::Scalar, 4, 4> Qleft(const Eigen::QuaternionBase<Derived> &q)
     {
@@ -57,6 +65,10 @@ class Utility
         return ans;
     }
 
+    /// @brief 四元数右乘 (q_updated = q * delta_q) == q_updated = Qright(delta_q) * q
+    /// @tparam Derived 
+    /// @param p 
+    /// @return 
     template <typename Derived>
     static Eigen::Matrix<typename Derived::Scalar, 4, 4> Qright(const Eigen::QuaternionBase<Derived> &p)
     {
@@ -84,6 +96,10 @@ class Utility
         return ypr / M_PI * 180.0;
     }
 
+    /// @brief  Convert euler to a rotation matrix.
+    /// @tparam Derived 
+    /// @param ypr 
+    /// @return
     template <typename Derived>
     static Eigen::Matrix<typename Derived::Scalar, 3, 3> ypr2R(const Eigen::MatrixBase<Derived> &ypr)
     {
@@ -125,12 +141,14 @@ class Utility
         f(iter + N);
     }
 
+    /// 当N=0时，递归结束
     template <typename Lambda, typename IterT>
     void unroller(const Lambda &f, const IterT &iter, uint_<0>)
     {
         f(iter);
     }
 
+    /// @brief  Normalize the angle to the range of [-180, 180].
     template <typename T>
     static T normalizeAngle(const T& angle_degrees) {
       T two_pi(2.0 * 180);
