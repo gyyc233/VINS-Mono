@@ -12,14 +12,16 @@
 #include "parameters.h"
 #include "utility/visualization.h"
 
+// 负责接收ROS传感器数据（IMU、特征点），管理滑动窗口策略，调用 Estimator 类进行状态估计，并发布估计结果（位姿、点云、关键帧等）
+// 连接了 IMU 和视觉特征输入，驱动 VIO 系统运行
 
 Estimator estimator;
 
-std::condition_variable con;
+std::condition_variable con; // 条件变量
 double current_time = -1;
-queue<sensor_msgs::ImuConstPtr> imu_buf;
-queue<sensor_msgs::PointCloudConstPtr> feature_buf;
-queue<sensor_msgs::PointCloudConstPtr> relo_buf;
+std::queue<sensor_msgs::ImuConstPtr> imu_buf; // 缓冲imu
+std::queue<sensor_msgs::PointCloudConstPtr> feature_buf; // 缓冲特征点云
+std::queue<sensor_msgs::PointCloudConstPtr> relo_buf; // 缓冲重定位点云
 int sum_of_wait = 0;
 
 std::mutex m_buf;
@@ -29,16 +31,18 @@ std::mutex m_estimator;
 
 double latest_time;
 Eigen::Vector3d tmp_P;
-Eigen::Quaterniond tmp_Q;
+Eigen::Quaterniond tmp_Q; // imu 上一时刻的旋转
 Eigen::Vector3d tmp_V;
-Eigen::Vector3d tmp_Ba;
-Eigen::Vector3d tmp_Bg;
-Eigen::Vector3d acc_0;
-Eigen::Vector3d gyr_0;
+Eigen::Vector3d tmp_Ba; // imu acc bias
+Eigen::Vector3d tmp_Bg; // imu gyro bias
+Eigen::Vector3d acc_0; // imu 上一时刻的加速度
+Eigen::Vector3d gyr_0; // imu 上一时刻的角速度
 bool init_feature = 0;
 bool init_imu = 1;
-double last_imu_t = 0;
+double last_imu_t = 0; // 上一帧imu时间戳
 
+/// @brief 使用 IMU 数据对当前状态进行预测（前向传播），为非关键帧情况下的位姿提供初始估计
+/// @param imu_msg 
 void predict(const sensor_msgs::ImuConstPtr &imu_msg)
 {
     double t = imu_msg->header.stamp.toSec();
@@ -51,6 +55,7 @@ void predict(const sensor_msgs::ImuConstPtr &imu_msg)
     double dt = t - latest_time;
     latest_time = t;
 
+    // 提取加速度与角速度数据
     double dx = imu_msg->linear_acceleration.x;
     double dy = imu_msg->linear_acceleration.y;
     double dz = imu_msg->linear_acceleration.z;
@@ -61,15 +66,22 @@ void predict(const sensor_msgs::ImuConstPtr &imu_msg)
     double rz = imu_msg->angular_velocity.z;
     Eigen::Vector3d angular_velocity{rx, ry, rz};
 
+    // 上一时刻加速度去偏
     Eigen::Vector3d un_acc_0 = tmp_Q * (acc_0 - tmp_Ba) - estimator.g;
 
+    // 角速度取中值
     Eigen::Vector3d un_gyr = 0.5 * (gyr_0 + angular_velocity) - tmp_Bg;
+    // 使用四元数中值法更新当前旋转状态
+    // Utility::deltaQ(...) 返回由角速度积分得到的增量旋转
     tmp_Q = tmp_Q * Utility::deltaQ(un_gyr * dt);
 
+    // 当前帧去偏后的线加速度
     Eigen::Vector3d un_acc_1 = tmp_Q * (linear_acceleration - tmp_Ba) - estimator.g;
 
+    // 中值加速度
     Eigen::Vector3d un_acc = 0.5 * (un_acc_0 + un_acc_1);
 
+    // 使用中值积分更新位置与速度
     tmp_P = tmp_P + dt * tmp_V + 0.5 * dt * dt * un_acc;
     tmp_V = tmp_V + dt * un_acc;
 
@@ -81,6 +93,7 @@ void update()
 {
     TicToc t_predict;
     latest_time = current_time;
+    // 从估计器中获取最新状态
     tmp_P = estimator.Ps[WINDOW_SIZE];
     tmp_Q = estimator.Rs[WINDOW_SIZE];
     tmp_V = estimator.Vs[WINDOW_SIZE];
@@ -89,12 +102,14 @@ void update()
     acc_0 = estimator.acc_0;
     gyr_0 = estimator.gyr_0;
 
-    queue<sensor_msgs::ImuConstPtr> tmp_imu_buf = imu_buf;
+    std::queue<sensor_msgs::ImuConstPtr> tmp_imu_buf = imu_buf;
     for (sensor_msgs::ImuConstPtr tmp_imu_msg; !tmp_imu_buf.empty(); tmp_imu_buf.pop())
         predict(tmp_imu_buf.front());
 
 }
 
+// 每个元素是一个pair: vector<ImuConstPtr>:imu数据列表，PointCloudConstPtr: 特征点云数据>
+// 将 IMU 和图像特征数据按时间同步组合，为滑动窗口优化提供输入
 std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>>
 getMeasurements()
 {
@@ -118,19 +133,24 @@ getMeasurements()
             feature_buf.pop();
             continue;
         }
+
+        // 提取一帧图像和对应的 IMU 数据
         sensor_msgs::PointCloudConstPtr img_msg = feature_buf.front();
         feature_buf.pop();
 
         std::vector<sensor_msgs::ImuConstPtr> IMUs;
         while (imu_buf.front()->header.stamp.toSec() < img_msg->header.stamp.toSec() + estimator.td)
         {
+            // 取出所有早于当前图像帧时间的 IMU 数据
             IMUs.emplace_back(imu_buf.front());
             imu_buf.pop();
         }
+        //把第一个晚于图像帧时间的 IMU 数据也加入进来,用于后续插值计算
         IMUs.emplace_back(imu_buf.front());
         if (IMUs.empty())
             ROS_WARN("no imu between two image");
         measurements.emplace_back(IMUs, img_msg);
+        // 这些数据将在 process() 中传给 estimator.processIMU(...) 和 estimator.processImage(...)
     }
     return measurements;
 }
@@ -147,13 +167,16 @@ void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
     m_buf.lock();
     imu_buf.push(imu_msg);
     m_buf.unlock();
+    // 通知等待线程 process() 唤醒数据同步处理流程
     con.notify_one();
 
     last_imu_t = imu_msg->header.stamp.toSec();
 
     {
         std::lock_guard<std::mutex> lg(m_state);
+        // 使用imu数据对系统状态进行前向传播
         predict(imu_msg);
+
         std_msgs::Header header = imu_msg->header;
         header.frame_id = "world";
         if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR)
@@ -162,6 +185,7 @@ void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
 }
 
 
+// 图像特征点数据到达的回调
 void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg)
 {
     if (!init_feature)
@@ -212,6 +236,9 @@ void process()
     {
         std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>> measurements;
         std::unique_lock<std::mutex> lk(m_buf);
+
+        // getMeasurements()，从 imu_buf 和 feature_buf 中提取时间同步的数据对
+        // 如果返回空数据则等待
         con.wait(lk, [&]
                  {
             return (measurements = getMeasurements()).size() != 0;
@@ -226,6 +253,7 @@ void process()
             {
                 double t = imu_msg->header.stamp.toSec();
                 double img_t = img_msg->header.stamp.toSec() + estimator.td;
+                // 若imu数据早于图像帧则连续积分
                 if (t <= img_t)
                 { 
                     if (current_time < 0)
@@ -245,21 +273,27 @@ void process()
                 }
                 else
                 {
+                    // 如果当前 IMU 数据晚于图像帧时间戳,划分两个时间段
                     double dt_1 = img_t - current_time;
                     double dt_2 = t - img_t;
                     current_time = img_t;
                     ROS_ASSERT(dt_1 >= 0);
                     ROS_ASSERT(dt_2 >= 0);
                     ROS_ASSERT(dt_1 + dt_2 > 0);
+                    
+                    // 计算权重
                     double w1 = dt_2 / (dt_1 + dt_2);
                     double w2 = dt_1 / (dt_1 + dt_2);
+
+                    // 双线性插值方法融合前后两段 IMU 数据
                     dx = w1 * dx + w2 * imu_msg->linear_acceleration.x;
                     dy = w1 * dy + w2 * imu_msg->linear_acceleration.y;
                     dz = w1 * dz + w2 * imu_msg->linear_acceleration.z;
                     rx = w1 * rx + w2 * imu_msg->angular_velocity.x;
                     ry = w1 * ry + w2 * imu_msg->angular_velocity.y;
                     rz = w1 * rz + w2 * imu_msg->angular_velocity.z;
-                    estimator.processIMU(dt_1, Vector3d(dx, dy, dz), Vector3d(rx, ry, rz));
+
+                    estimator.processIMU(dt_1, Eigen::Vector3d(dx, dy, dz), Eigen::Vector3d(rx, ry, rz));
                     //printf("dimu: dt:%f a: %f %f %f w: %f %f %f\n",dt_1, dx, dy, dz, rx, ry, rz);
                 }
             }
@@ -272,19 +306,19 @@ void process()
             }
             if (relo_msg != NULL)
             {
-                vector<Vector3d> match_points;
+                std::vector<Eigen::Vector3d> match_points;
                 double frame_stamp = relo_msg->header.stamp.toSec();
                 for (unsigned int i = 0; i < relo_msg->points.size(); i++)
                 {
-                    Vector3d u_v_id;
+                    Eigen::Vector3d u_v_id;
                     u_v_id.x() = relo_msg->points[i].x;
                     u_v_id.y() = relo_msg->points[i].y;
                     u_v_id.z() = relo_msg->points[i].z;
                     match_points.push_back(u_v_id);
                 }
-                Vector3d relo_t(relo_msg->channels[0].values[0], relo_msg->channels[0].values[1], relo_msg->channels[0].values[2]);
+                Eigen::Vector3d relo_t(relo_msg->channels[0].values[0], relo_msg->channels[0].values[1], relo_msg->channels[0].values[2]);
                 Quaterniond relo_q(relo_msg->channels[0].values[3], relo_msg->channels[0].values[4], relo_msg->channels[0].values[5], relo_msg->channels[0].values[6]);
-                Matrix3d relo_r = relo_q.toRotationMatrix();
+                Eigen::Matrix3d relo_r = relo_q.toRotationMatrix();
                 int frame_index;
                 frame_index = relo_msg->channels[0].values[7];
                 estimator.setReloFrame(frame_stamp, frame_index, match_points, relo_t, relo_r);
@@ -293,7 +327,7 @@ void process()
             ROS_DEBUG("processing vision data with stamp %f \n", img_msg->header.stamp.toSec());
 
             TicToc t_s;
-            map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> image;
+            std::map<int, std::vector<std::pair<int, Eigen::Matrix<double, 7, 1>>>> image;
             for (unsigned int i = 0; i < img_msg->points.size(); i++)
             {
                 int v = img_msg->channels[0].values[i] + 0.5;

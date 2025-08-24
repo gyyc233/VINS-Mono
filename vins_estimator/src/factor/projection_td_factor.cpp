@@ -9,6 +9,8 @@ ProjectionTdFactor::ProjectionTdFactor(const Eigen::Vector3d &_pts_i, const Eige
                                        pts_i(_pts_i), pts_j(_pts_j), 
                                        td_i(_td_i), td_j(_td_j)
 {
+    // 初始化观测点坐标、速度、时间偏移、图像行号等参数
+    // 并根据是否启用 UNIT_SPHERE_ERROR 宏定义构建切平面基底
     velocity_i.x() = _velocity_i.x();
     velocity_i.y() = _velocity_i.y();
     velocity_i.z() = 0;
@@ -45,16 +47,24 @@ bool ProjectionTdFactor::Evaluate(double const *const *parameters, double *resid
 
     double inv_dep_i = parameters[3][0];
 
+    // IMU 与图像之间的延迟
     double td = parameters[4][0];
 
     Eigen::Vector3d pts_i_td, pts_j_td;
-    pts_i_td = pts_i - (td - td_i + TR / ROW * row_i) * velocity_i;
+    // 滚动快门模型TR=0
+
+    // td - td_i 帧i相对于imu的时间偏移，乘以速度得到像素差，pts_i减去该部分，得到偏移前的像素坐标
+    pts_i_td = pts_i - (td - td_i + TR / ROW * row_i) * velocity_i; 
     pts_j_td = pts_j - (td - td_j + TR / ROW * row_j) * velocity_j;
-    Eigen::Vector3d pts_camera_i = pts_i_td / inv_dep_i;
-    Eigen::Vector3d pts_imu_i = qic * pts_camera_i + tic;
-    Eigen::Vector3d pts_w = Qi * pts_imu_i + Pi;
-    Eigen::Vector3d pts_imu_j = Qj.inverse() * (pts_w - Pj);
-    Eigen::Vector3d pts_camera_j = qic.inverse() * (pts_imu_j - tic);
+
+    Eigen::Vector3d pts_camera_i = pts_i_td / inv_dep_i; // 归一化相机坐标转相机坐标
+    Eigen::Vector3d pts_imu_i = qic * pts_camera_i + tic; // 转到imu坐标系
+    Eigen::Vector3d pts_w = Qi * pts_imu_i + Pi; // 转到世界坐标系
+
+    Eigen::Vector3d pts_imu_j = Qj.inverse() * (pts_w - Pj); // 将该特征点从世界坐标系转到j帧imu坐标系
+    Eigen::Vector3d pts_camera_j = qic.inverse() * (pts_imu_j - tic); // 转到j帧相机坐标
+    
+    // 定义残差
     Eigen::Map<Eigen::Vector2d> residual(residuals);
 
 #ifdef UNIT_SPHERE_ERROR 
@@ -128,6 +138,11 @@ bool ProjectionTdFactor::Evaluate(double const *const *parameters, double *resid
             Eigen::Map<Eigen::Vector2d> jacobian_feature(jacobians[3]);
             jacobian_feature = reduce * ric.transpose() * Rj.transpose() * Ri * ric * pts_i_td * -1.0 / (inv_dep_i * inv_dep_i);
         }
+
+        // TODO: 残差对时间偏移的jacobian
+        // 建模：
+        // pts_i_td = pts_i - (td - td_i + TR / ROW * row_i) * velocity_i;
+        // pts_j_td = pts_j - (td - td_j + TR / ROW * row_j) * velocity_j;
         if (jacobians[4])
         {
             Eigen::Map<Eigen::Vector2d> jacobian_td(jacobians[4]);
@@ -149,6 +164,8 @@ void ProjectionTdFactor::check(double **parameters)
     jaco[2] = new double[2 * 7];
     jaco[3] = new double[2 * 1];
     jaco[4] = new double[2 * 1];
+
+    // 解析jacobian
     Evaluate(parameters, res, jaco);
     puts("check begins");
 
@@ -197,6 +214,7 @@ void ProjectionTdFactor::check(double **parameters)
     residual = sqrt_info * residual;
 
     puts("num");
+    // 数值差分jacobian
     std::cout << residual.transpose() << std::endl;
 
     const double eps = 1e-6;
@@ -218,6 +236,7 @@ void ProjectionTdFactor::check(double **parameters)
         int a = k / 3, b = k % 3;
         Eigen::Vector3d delta = Eigen::Vector3d(b == 0, b == 1, b == 2) * eps;
 
+        // 选择参数扰动方式
         if (a == 0)
             Pi += delta;
         else if (a == 1)
