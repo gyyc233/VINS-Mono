@@ -954,10 +954,12 @@ void Estimator::optimization()
     if (marginalization_flag == MARGIN_OLD)
     {
         // 融合了上一次边缘化的先验和当前帧间的 IMU 约束
-        // 边缘化目标：最老帧的状态（位姿 + 速度偏置）
+        // 边缘化目标：最老帧的imu状态与零偏，路标点逆深度
+        // 要边缘化的参数块是 para_Pose[0] para_SpeedBias[0] 以及 para_Feature[feature_index](滑窗内的第feature_index个点的逆深度)
         MarginalizationInfo *marginalization_info = new MarginalizationInfo();
         vector2double();
 
+         // 首先添加上一次先验残差项
         if (last_marginalization_info)
         {
             vector<int> drop_set;
@@ -980,6 +982,7 @@ void Estimator::optimization()
             if (pre_integrations[1]->sum_dt < 10.0)
             {
                 // 创建一个 IMU 因子 IMUFactor，基于该帧的预积分数据，描述帧 0 和帧 1 之间的 IMU 测量约束
+                // 添加IMU的marg信息到 marginalization_info 中：第0帧和第1帧之间的IMU预积分值以及第0帧和第1帧相关优化变量
                 IMUFactor* imu_factor = new IMUFactor(pre_integrations[1]);
 
                 // 构建残差块信息，帧0与帧1的位姿与加速度bias,要边缘化的参数索引是0和1，即帧 0 的 pose 和 speedbias
@@ -1021,6 +1024,7 @@ void Estimator::optimization()
                         continue;
 
                     // 该特征点在后续帧中的归一化相机坐标 pts_j
+                    // 添加第0帧的视觉重投影残差要边缘化的变量: 相机位姿，imu-camera外参,特征点逆深度,td
                     Eigen::Vector3d pts_j = it_per_frame.point;
                     if (ESTIMATE_TD)
                     {
@@ -1050,6 +1054,7 @@ void Estimator::optimization()
 
         // 预边缘化操作: 计算残差与jacobian
         TicToc t_pre_margin;
+        // 得到每次 IMU 和视觉观测(cost_function)对 应的参数块(parameter_blocks)，雅可比矩阵(jacobians)，残差值(residuals);
         marginalization_info->preMarginalize();
         ROS_DEBUG("pre marginalization %f ms", t_pre_margin.toc());
         
