@@ -187,7 +187,7 @@ void* ThreadsConstructA(void* threadsstruct)
 
     for (auto it : p->sub_factors)
     {
-        // 遍历该残差块涉及的所有参数块
+        //遍历该factor中的所有参数块，五个参数块，分别计算
         for (int i = 0; i < static_cast<int>(it->parameter_blocks.size()); i++)
         {
             // a. 获取参数块的索引和尺寸
@@ -209,10 +209,11 @@ void* ThreadsConstructA(void* threadsstruct)
                 if (size_j == 7)
                     size_j = 6;
                 Eigen::MatrixXd jacobian_j = it->jacobians[j].leftCols(size_j);
-                if (i == j)
+                if (i == j) // 对角区域
                     p->A.block(idx_i, idx_j, size_i, size_j) += jacobian_i.transpose() * jacobian_j;
                 else
                 {
+                    // 非对角区域
                     p->A.block(idx_i, idx_j, size_i, size_j) += jacobian_i.transpose() * jacobian_j;
                     p->A.block(idx_j, idx_i, size_j, size_i) = p->A.block(idx_i, idx_j, size_i, size_j).transpose();
                 }
@@ -286,7 +287,7 @@ void MarginalizationInfo::marginalize()
         }
     }
 
-    // 构造4个线程，并确定线程的主程序
+    // 将每个线程构建的A和b加起来
     for( int i = NUM_THREADS - 1; i >= 0; i--)  
     {
         pthread_join( tids[i], NULL ); 
@@ -305,6 +306,8 @@ void MarginalizationInfo::marginalize()
     }
 
     // 构建 Amm 的伪逆，仅保留大于阈值的特征值
+    // 求Amm的逆矩阵时，为了保证数值稳定性，做了Amm=1/2*(Amm+Amm^T)的运算，Amm本身是一个对称矩阵
+    // 对Amm进行了特征值分解,再求逆，更加的快速
     Eigen::MatrixXd Amm_inv = saes.eigenvectors() * Eigen::VectorXd((saes.eigenvalues().array() > eps).select(saes.eigenvalues().array().inverse(), 0)).asDiagonal() * saes.eigenvectors().transpose();
     printf("error1: %f\n", (Amm * Amm_inv - Eigen::MatrixXd::Identity(m, m)).sum());
 
@@ -319,8 +322,6 @@ void MarginalizationInfo::marginalize()
     //  使用舒尔补:
     //  C = Arr - Arm*Amm^{-1}Amr
     //  d = brr - Arm*Amm^{-1}bmm
-    
-    //舒尔补，上面这段代码边缘化掉xm变量，保留xb变量
 
     // Schur 补消去变量 m 个参数
     Eigen::VectorXd bmm = b.segment(0, m);
@@ -330,8 +331,9 @@ void MarginalizationInfo::marginalize()
     Eigen::VectorXd brr = b.segment(m, n);
     A = Arr - Arm * Amm_inv * Amr;
     b = brr - Arm * Amm_inv * bmm; // 这里的A和b是marg过的A和b,大小是发生了变化的
+    //舒尔补，上面这段代码边缘化掉xm变量，保留xb变量
 
-    // 下面是更新先验残差项
+    // 下面从A和b中恢复出雅克比矩阵和残差，这里Ab的形状是Ax=b 是schur消元后的矩阵
     // 对新的 Hessian 进行特征值分解
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> saes2(A);
 
@@ -343,8 +345,8 @@ void MarginalizationInfo::marginalize()
     Eigen::VectorXd S_sqrt = S.cwiseSqrt();
     Eigen::VectorXd S_inv_sqrt = S_inv.cwiseSqrt();
 
-    //分别指的是边缘化之后从信息矩阵A和b中恢复出来雅克比矩阵和残差向量；
-    //两者会作为先验残差带入到下一轮的先验残差的雅克比和残差的计算当中去
+    // 边缘化之后从A和b中恢复出来雅克比矩阵J和残差e（这里是恢复jacobian,不是H矩阵）；
+    // 两者会作为先验残差带入到下一轮的先验残差的雅克比和残差的计算当中去
     linearized_jacobians = S_sqrt.asDiagonal() * saes2.eigenvectors().transpose();
     linearized_residuals = S_inv_sqrt.asDiagonal() * saes2.eigenvectors().transpose() * b;
     std::cout << A << std::endl
